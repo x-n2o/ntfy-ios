@@ -56,7 +56,7 @@ jobs:
               'IS_SIGNIN_ENABLED': False,
               'GOOGLE_APP_ID': '1:000000000000:ios:0000000000000000000000',
           }
-          Path('ntfy/GoogleService-Info.plist').write_bytes(plistlib.dumps(config))
+          Path('ntfy/Assets/GoogleService-Info.plist').write_bytes(plistlib.dumps(config))
           PY
       - name: Archive for iPhone without signing
         shell: bash
