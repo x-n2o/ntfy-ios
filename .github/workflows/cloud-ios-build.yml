@@ -1,0 +1,102 @@
+name: Cloud iOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [cloud-critical-alerts-build]
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify upstream Critical Alerts implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+          for path in (Path('ntfy/ntfy.entitlements'), Path('ntfyNSE/ntfyNSE.entitlements')):
+              with path.open('rb') as source:
+                  entitlements = plistlib.load(source)
+              assert entitlements['com.apple.developer.usernotifications.critical-alerts'] is True, path
+          source = Path('ntfy/Utils/NotificationContent.swift').read_text()
+          assert '.critical' in source and 'priority' in source
+          PY
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          git rev-parse HEAD > "$RUNNER_TEMP/artifacts/source-commit.txt"
+          xcodebuild -version > "$RUNNER_TEMP/artifacts/xcode-version.txt"
+          xcodebuild -showsdks > "$RUNNER_TEMP/artifacts/sdks.txt"
+          shasum -a 256 ntfy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved > "$RUNNER_TEMP/artifacts/dependency-lock.sha256"
+      - name: Create build-only Firebase configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+          config = {
+              'API_KEY': 'build-only-not-a-real-api-key',
+              'GCM_SENDER_ID': '000000000000',
+              'PLIST_VERSION': '1',
+              'BUNDLE_ID': 'io.heckel.ntfy',
+              'PROJECT_ID': 'ntfy-build-only',
+              'STORAGE_BUCKET': 'ntfy-build-only.invalid',
+              'IS_ADS_ENABLED': False,
+              'IS_ANALYTICS_ENABLED': False,
+              'IS_APPINVITE_ENABLED': False,
+              'IS_GCM_ENABLED': True,
+              'IS_SIGNIN_ENABLED': False,
+              'GOOGLE_APP_ID': '1:000000000000:ios:0000000000000000000000',
+          }
+          Path('ntfy/GoogleService-Info.plist').write_bytes(plistlib.dumps(config))
+          PY
+      - name: Archive for iPhone without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ntfy.xcodeproj \
+            -scheme ntfy \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/ntfy.xcarchive" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            2>&1 | tee "$RUNNER_TEMP/artifacts/build.log"
+      - name: Package unsigned build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$RUNNER_TEMP/ntfy.xcarchive/Products/Applications/ntfy.app" "$RUNNER_TEMP/ipa/Payload/ntfy.app"
+          ditto -c -k --keepParent "$RUNNER_TEMP/ipa/Payload" "$RUNNER_TEMP/artifacts/ntfy-unsigned.ipa"
+          cp .github/CLOUD_BUILD.md "$RUNNER_TEMP/artifacts/README.md"
+          shasum -a 256 "$RUNNER_TEMP/artifacts/ntfy-unsigned.ipa" > "$RUNNER_TEMP/artifacts/ipa.sha256"
+          {
+            echo '### Unsigned ntfy build'
+            echo 'Compiled from upstream main with Critical Alerts support.'
+            echo 'The artifact is not installable as delivered and uses a nonfunctional Firebase placeholder.'
+            echo 'Working iPhone push alerts require real Firebase/APNs configuration, Apple signing, and Critical Alerts entitlement approval.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve build evidence and unsigned artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ntfy-ios-unsigned-${{ github.sha }}
+          path: ${{ runner.temp }}/artifacts/
+          if-no-files-found: error
+          retention-days: 14
